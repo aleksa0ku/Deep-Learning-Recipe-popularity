@@ -3,20 +3,26 @@ import pandas as pd
 import joblib
 import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
+# Initialize the lemmatizer
+lemmatizer = WordNetLemmatizer()
 
-# Load the trained models (assuming they are saved in 'best_models' directory)
+# Load the trained models 
 def load_model(model_name, role, feature_set):
     model_path = f"best_models/{role}/{feature_set}/{model_name}_best_model.pkl"
     return joblib.load(model_path)
 
-# Load LSTM model separately if used
+# Load LSTM model separately
 def load_lstm_model():
     model_path = "best_models/best_model_lstm_search_1_features_50.pt"
     model = torch.load(model_path)
     model.eval()
     return model
 
-# Function to preprocess the input data similarly to how the model was trained
+# Function to lemmatize text
+def lemmatize_text(text):
+    return " ".join([lemmatizer.lemmatize(word) for word in text.split()])
+
+# Function to preprocess the input data
 def preprocess_input(data):
     # Apply lemmatization to the text fields
     data['Recipe Title'] = data['Recipe Title'].apply(lemmatize_text)
@@ -95,20 +101,13 @@ if st.button("Predict Popularity"):
     # Preprocess the input data
     preprocessed_data = preprocess_input(input_data)
 
-    # Choose the model to use
-    feature_set = "Top 50 Features"  # or "Top all Features", "Top 20 Features", etc.
-    model_name = "Gradient Boosting"  # Choose from Linear Regression, Ridge Regression, etc.
-    
-    if model_name == "LSTM":
+    if role == "Publisher":
+        model_name = "SimpleLSTM"
         model = load_lstm_model()
         prediction = model(torch.tensor(preprocessed_data.toarray(), dtype=torch.float32))
-    else:
-        # Load the appropriate model
-        model = load_model(model_name, role, feature_set)
-        
-        # Predict the popularity score
-        prediction = model.predict(preprocessed_data)
-
+    elif role == "Community":
+        model_name = "ElasticNet Regression"    
+    
     # Display the result
     st.success(f"Predicted Popularity Score: {prediction[0]:.2f}")
 
