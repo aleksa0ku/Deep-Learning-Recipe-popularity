@@ -2,56 +2,71 @@ import streamlit as st
 import pandas as pd
 import joblib
 import torch
+import torch.nn as nn
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import StandardScaler
+import nltk
+from nltk.stem import WordNetLemmatizer
+import re
+
+# Load necessary NLTK data
+nltk.download('wordnet')
+nltk.download('omw-1.4')
+nltk.download('stopwords')
+
 # Initialize the lemmatizer
 lemmatizer = WordNetLemmatizer()
 
-# Load the trained models 
-def load_model(model_name, role, feature_set):
-    model_path = f"best_models/{role}/{feature_set}/{model_name}_best_model.pkl"
-    return joblib.load(model_path)
+# Function to normalize and process text
+def normalize_ingredient(ingredient):
+    ingredient = re.sub(r'\b(½|¼|¾|⅓|⅔)\b', '', ingredient)
+    ingredient = re.sub(r'\d+\s*/\s*\d+', '', ingredient)
+    ingredient = re.sub(r'\d+', '', ingredient)
+    ingredient = re.sub(r'\b(cup|cups|tablespoon|tablespoons|teaspoon|teaspoons|oz|ounce|ounces|lb|pound|pounds|g|grams|kg|kilograms|ml|milliliters|liter|liters)\b', '', ingredient, flags=re.IGNORECASE)
+    ingredient = re.sub(r'\([^)]*\)', '', ingredient)
+    ingredient = re.sub(r'[^\w\s]', '', ingredient)
+    ingredient = ' '.join(ingredient.split())
+    return ingredient.strip().lower()
 
-# Load LSTM model separately
-def load_lstm_model():
-    model_path = "best_models/best_model_lstm_search_1_features_50.pt"
-    model = torch.load(model_path)
-    model.eval()
-    return model
-
-# Function to lemmatize text
 def lemmatize_text(text):
     return " ".join([lemmatizer.lemmatize(word) for word in text.split()])
 
-# Function to preprocess the input data
+# Function to count ingredients and steps
+def count_ingredients(ingredients):
+    return len(ingredients.split('; '))
+
+def count_steps(preparation_steps):
+    return len(preparation_steps.split('. '))
+
+# Define the LSTM model architecture
+class SimpleLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers=1, dropout=0.2):
+        super(SimpleLSTM, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        h_0 = torch.zeros(1, x.size(0), hidden_size).to(x.device)  # hidden state
+        c_0 = torch.zeros(1, x.size(0), hidden_size).to(x.device)  # cell state
+        
+        out, (h_n, c_n) = self.lstm(x, (h_0, c_0))
+        out = self.fc(out[:, -1, :])  
+        return out
+
+# Preprocess the input data
 def preprocess_input(data):
-    # Apply lemmatization to the text fields
-    data['Recipe Title'] = data['Recipe Title'].apply(lemmatize_text)
-    data['Ingredients'] = data['Ingredients'].apply(lemmatize_text)
+    # Normalize and lemmatize text fields
+    data['Recipe Title'] = data['Recipe Title'].apply(normalize_ingredient).apply(lemmatize_text)
+    data['Ingredients'] = data['Ingredients'].apply(normalize_ingredient).apply(lemmatize_text)
     data['Tags'] = data['Tags'].apply(lemmatize_text)
     data['Preparation Steps'] = data['Preparation Steps'].apply(lemmatize_text)
-    
-    # TF-IDF vectorization for each text field
-    tfidf_vectorizer = TfidfVectorizer(max_features=50, stop_words='english')
-    
-    # Vectorize and concatenate the TF-IDF matrices
-    tfidf_title = tfidf_vectorizer.fit_transform(data['Recipe Title'].values)
-    tfidf_ingredients = tfidf_vectorizer.fit_transform(data['Ingredients'].values)
-    tfidf_tags = tfidf_vectorizer.fit_transform(data['Tags'].values)
-    tfidf_prep_steps = tfidf_vectorizer.fit_transform(data['Preparation Steps'].values)
-    
-    # Convert TF-IDF matrices to DataFrames
-    df_tfidf_title = pd.DataFrame(tfidf_title.toarray(), columns=[f'title_{feat}' for feat in tfidf_vectorizer.get_feature_names_out()])
-    df_tfidf_ingredients = pd.DataFrame(tfidf_ingredients.toarray(), columns=[f'ingredients_{feat}' for feat in tfidf_vectorizer.get_feature_names_out()])
-    df_tfidf_tags = pd.DataFrame(tfidf_tags.toarray(), columns=[f'tags_{feat}' for feat in tfidf_vectorizer.get_feature_names_out()])
-    df_tfidf_prep_steps = pd.DataFrame(tfidf_prep_steps.toarray(), columns=[f'prep_{feat}' for feat in tfidf_vectorizer.get_feature_names_out()])
-    
-    # Combine all TF-IDF DataFrames with the original data
-    preprocessed_data = pd.concat([data.reset_index(drop=True), df_tfidf_title, df_tfidf_ingredients, df_tfidf_tags, df_tfidf_prep_steps], axis=1)
-    
-    # Drop the original text columns that have been vectorized
-    preprocessed_data.drop(columns=['Recipe Title', 'Ingredients', 'Tags', 'Preparation Steps'], inplace=True)
-    
-    return preprocessed_data
+    data['Categories'] = data['Categories'].apply(lemmatize_text)
+
+    # Count ingredients and steps
+    data['Number of Ingredients'] = data['Ingredients'].apply(count_ingredients)
+    data['Number of Steps'] = data['Preparation Steps'].apply(count_steps)
+
+    return data
 
 # Streamlit app
 st.title("Recipe Popularity Predictor")
@@ -61,6 +76,7 @@ title = st.text_input("Recipe Title")
 tags = st.text_input("Tags (separate with commas)")
 ingredients = st.text_area("Ingredients (one per line)")
 prep_steps = st.text_area("Preparation Steps (one per line)")
+categories = st.text_area("Dish categories (breakfast, dinner, dessert, etc)")
 
 # Nutritional values input fields
 calories = st.number_input("Calories", min_value=0)
@@ -88,28 +104,91 @@ if st.button("Predict Popularity"):
         'Preparation Steps': [prep_steps],
         'Calories': [calories],
         'Fat': [fat],
-        'Carbohydrates': [carbs],
+        'Carbs': [carbs],
         'Fiber': [fiber],
         'Sugar': [sugar],
         'Protein': [protein],
-        'Preparation Time': [prep_time],
-        'Cooking Time': [cook_time],
+        'Prep Time': [prep_time],
+        'Cook Time': [cook_time],
         'Total Time': [total_time],
+        'Categories': [categories],
         'Role': [0 if role == 'Publisher' else 1]
     })
     
     # Preprocess the input data
-    preprocessed_data = preprocess_input(input_data)
+    X_test = preprocess_input(input_data)
+    
+    # Scale numerical features first
+    numerical_columns = ['Cook Time', 'Prep Time', 'Total Time', 
+                         'Protein', 'Fat', 'Calories', 'Sugar', 
+                         'Carbs', 'Fiber', 'Number of Ingredients', 
+                         'Number of Steps']
+    
+    scaler = StandardScaler()
+    X_test[numerical_columns] = scaler.fit_transform(X_test[numerical_columns])
+    
+    # Vectorize text features after scaling
+    tfidf_vectorizer_title = joblib.load('Preprocessing/tfidf_vectorizer_recipe_title.pkl')
+    tfidf_vectorizer_ingredients = joblib.load('Preprocessing/tfidf_vectorizer_ingredients.pkl')
+    tfidf_vectorizer_prep_steps = joblib.load('Preprocessing/tfidf_vectorizer_preparation_steps.pkl')
+    tfidf_vectorizer_tags = joblib.load('Preprocessing/tfidf_vectorizer_tags.pkl')
+    tfidf_vectorizer_categories = joblib.load('Preprocessing/tfidf_vectorizer_categories.pkl')
 
+    tfidf_title = pd.DataFrame(tfidf_vectorizer_title.transform(X_test['Recipe Title']).toarray(), columns=tfidf_vectorizer_title.get_feature_names_out())
+    tfidf_ingredients = pd.DataFrame(tfidf_vectorizer_ingredients.transform(X_test['Ingredients']).toarray(), columns=tfidf_vectorizer_ingredients.get_feature_names_out())
+    tfidf_prep_steps = pd.DataFrame(tfidf_vectorizer_prep_steps.transform(X_test['Preparation Steps']).toarray(), columns=tfidf_vectorizer_prep_steps.get_feature_names_out())
+    tfidf_tags = pd.DataFrame(tfidf_vectorizer_tags.transform(X_test['Tags']).toarray(), columns=tfidf_vectorizer_tags.get_feature_names_out())
+    tfidf_categories = pd.DataFrame(tfidf_vectorizer_categories.transform(X_test['Categories']).toarray(), columns=tfidf_vectorizer_categories.get_feature_names_out())
+
+    # Combine all features into a single DataFrame
+    X_test = pd.concat([tfidf_title, tfidf_ingredients, tfidf_prep_steps, tfidf_tags, tfidf_categories,
+                        X_test[numerical_columns]], axis=1)
+    
+    # Load the appropriate model based on the recipe role
     if role == "Publisher":
-        model_name = "SimpleLSTM"
-        model = load_lstm_model()
-        prediction = model(torch.tensor(preprocessed_data.toarray(), dtype=torch.float32))
-    elif role == "Community":
-        model_name = "ElasticNet Regression"    
+
+        input_size = X_test.shape[1]
+        hidden_size = 128 
+        output_size = 1
+        model = SimpleLSTM(input_size, hidden_size, output_size)
+
+        # Load the state dict and apply it to the model
+        model = torch.load('./best_models/publisher/simple_lstm_best.pth')
+        model.eval()
+
+        # Convert the input to a PyTorch tensor, add batch and sequence dimensions
+        X_test_tensor = torch.tensor(X_test.to_numpy(), dtype=torch.float32).unsqueeze(1)
+        
+        # Make predictions
+        with torch.no_grad():
+            prediction = model(X_test_tensor)
+            prediction = prediction.item()  # Convert from tensor to float
+
+        prediction_percentage = max(0, min(prediction * 100, 100))
+    else:
+    
+        model = joblib.load('./best_models/community/ElasticNet Regression_best_model.pkl')
+    
+        # Handle missing columns by adding them with zeros
+        missing_in_test = set(model.feature_names_in_) - set(X_test.columns)
+        for col in missing_in_test:
+            X_test[col] = 0
+
+        # Remove extra columns that were not in the model training
+        extra_in_test = set(X_test.columns) - set(model.feature_names_in_)
+        X_test = X_test.drop(columns=extra_in_test)
+
+        # Ensure columns are in the same order as expected by the model
+        X_test = X_test[model.feature_names_in_]
+
+        # Make predictions
+        prediction = model.predict(X_test)[0]
+
+        # Convert prediction to percentage
+        prediction_percentage = max(0, min(prediction * 100, 100))
     
     # Display the result
-    st.success(f"Predicted Popularity Score: {prediction[0]:.2f}")
+    st.success(f"Predicted Popularity Score: {prediction_percentage:.2f}%")
 
 if st.button("Reset"):
     st.experimental_rerun()
